@@ -3,35 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>3D Bean - Close Follow</title>
+    <title>3D Bean - Gravity Edition</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #111; touch-action: none; }
-        #ui {
-            position: absolute;
-            bottom: 40px;
-            left: 40px;
-            width: 100px;
-            height: 100px;
-            background: rgba(255,255,255,0.1);
-            border: 2px solid rgba(255,255,255,0.3);
-            border-radius: 50%;
-            z-index: 10;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-        #stick {
-            width: 40px;
-            height: 40px;
-            background: white;
-            border-radius: 50%;
-            opacity: 0.6;
-            pointer-events: none;
-        }
+        body { margin: 0; overflow: hidden; background: #111; touch-action: none; font-family: sans-serif; }
+        #ui-layer { position: absolute; bottom: 40px; width: 100%; display: flex; justify-content: space-between; padding: 0 40px; box-sizing: border-box; pointer-events: none; }
+        #joystick { width: 100px; height: 100px; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; display: flex; justify-content: center; align-items: center; pointer-events: auto; }
+        #stick { width: 40px; height: 40px; background: white; border-radius: 50%; opacity: 0.6; }
+        #jump-btn { width: 80px; height: 80px; background: rgba(255,255,255,0.2); border: 2px solid white; border-radius: 50%; display: flex; justify-content: center; align-items: center; color: white; font-weight: bold; pointer-events: auto; user-select: none; -webkit-tap-highlight-color: transparent; }
     </style>
 </head>
 <body>
-    <div id="ui"><div id="stick"></div></div>
+    <div id="ui-layer">
+        <div id="joystick"><div id="stick"></div></div>
+        <div id="jump-btn">JUMP</div>
+    </div>
 
     <script type="importmap">
         {
@@ -46,16 +31,27 @@
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+        // --- CONSTANTS & PHYSICS ---
+        const GRAVITY = -0.015;
+        const JUMP_FORCE = 0.3;
+        const GROUND_Y = 0.8;
+        const MOVE_SPEED = 0.15;
+
+        // Optimization: Pre-allocate vectors to avoid creating new objects every frame
+        const _forward = new THREE.Vector3();
+        const _right = new THREE.Vector3();
+        const _moveVec = new THREE.Vector3();
+        const _up = new THREE.Vector3(0, 1, 0);
+
+        // --- SETUP ---
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x1a1a1a);
-        
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        // Start closer
         camera.position.set(0, 3, 5);
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Optimization
         document.body.appendChild(renderer.domElement);
 
         scene.add(new THREE.AmbientLight(0xffffff, 0.8));
@@ -63,43 +59,52 @@
         dirLight.position.set(5, 10, 7);
         scene.add(dirLight);
 
-        const grid = new THREE.GridHelper(100, 100, 0x444444, 0x222222);
-        scene.add(grid);
+        scene.add(new THREE.GridHelper(100, 100, 0x444444, 0x222222));
 
-        const beanGroup = new THREE.Group();
+        // --- THE BEAN ---
+        const bean = new THREE.Group();
         const body = new THREE.Mesh(
-            new THREE.CapsuleGeometry(0.4, 0.8, 4, 16),
+            new THREE.CapsuleGeometry(0.4, 0.8, 4, 12), // Lower segments for optimization
             new THREE.MeshStandardMaterial({ color: 0xf1c40f })
         );
-        beanGroup.add(body);
+        bean.add(body);
 
-        const eyeGeo = new THREE.SphereGeometry(0.05, 8, 8);
         const eyeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
-        const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+        const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8), eyeMat);
         eyeL.position.set(0.15, 0.4, 0.35);
-        const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+        const eyeR = eyeL.clone();
         eyeR.position.set(-0.15, 0.4, 0.35);
-        beanGroup.add(eyeL, eyeR);
+        bean.add(eyeL, eyeR);
+        
+        bean.position.y = GROUND_Y;
+        scene.add(bean);
 
-        beanGroup.position.y = 0.8;
-        scene.add(beanGroup);
+        let velocityY = 0;
+        let isGrounded = true;
 
+        // --- CONTROLS ---
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
-        controls.dampingFactor = 0.1; // Snappier response
-        
-        // --- TIGHTER CAMERA LIMITS ---
-        controls.minDistance = 3; // Closer zoom
-        controls.maxDistance = 8; // Don't let it drift too far
+        controls.minDistance = 3;
+        controls.maxDistance = 10;
         controls.maxPolarAngle = Math.PI / 2.2;
 
-        const stick = document.getElementById('stick');
-        const ui = document.getElementById('ui');
-        let moveX = 0, moveZ = 0;
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+            if (e.code === 'Space' && isGrounded) jump();
+        });
+        window.addEventListener('keyup', (e) => keys[e.code] = false);
 
-        const handleInput = (e) => {
+        // Mobile Inputs
+        let moveX = 0, moveZ = 0;
+        const stick = document.getElementById('stick');
+        const joystick = document.getElementById('joystick');
+        const jumpBtn = document.getElementById('jump-btn');
+
+        const handleMove = (e) => {
             const touch = e.touches ? e.touches[0] : e;
-            const rect = ui.getBoundingClientRect();
+            const rect = joystick.getBoundingClientRect();
             const dx = touch.clientX - (rect.left + rect.width / 2);
             const dy = touch.clientY - (rect.top + rect.height / 2);
             const dist = Math.min(Math.sqrt(dx*dx + dy*dy), 50);
@@ -109,54 +114,62 @@
             stick.style.transform = `translate(${moveX * 30}px, ${moveZ * 30}px)`;
         };
 
-        ui.addEventListener('touchstart', handleInput);
-        ui.addEventListener('touchmove', handleInput);
-        ui.addEventListener('touchend', () => {
+        joystick.addEventListener('touchstart', handleMove);
+        joystick.addEventListener('touchmove', handleMove);
+        joystick.addEventListener('touchend', () => {
             moveX = 0; moveZ = 0;
             stick.style.transform = `translate(0,0)`;
         });
 
-        const keys = {};
-        window.addEventListener('keydown', (e) => keys[e.code] = true);
-        window.addEventListener('keyup', (e) => keys[e.code] = false);
+        const jump = () => {
+            if (isGrounded) {
+                velocityY = JUMP_FORCE;
+                isGrounded = false;
+            }
+        };
+        jumpBtn.addEventListener('touchstart', (e) => { e.preventDefault(); jump(); });
 
+        // --- MAIN LOOP ---
         function animate() {
             requestAnimationFrame(animate);
 
-            const forward = new THREE.Vector3();
-            camera.getWorldDirection(forward);
-            forward.y = 0;
-            forward.normalize();
+            // 1. Directional Logic
+            camera.getWorldDirection(_forward);
+            _forward.y = 0;
+            _forward.normalize();
+            _right.crossVectors(_forward, _up);
 
-            const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0));
-
-            let inputX = moveX;
-            let inputZ = moveZ;
+            // 2. Movement Input
+            let inputX = moveX, inputZ = moveZ;
             if (keys['KeyW'] || keys['ArrowUp']) inputZ = -1;
             if (keys['KeyS'] || keys['ArrowDown']) inputZ = 1;
             if (keys['KeyA'] || keys['ArrowLeft']) inputX = -1;
             if (keys['KeyD'] || keys['ArrowRight']) inputX = 1;
 
-            const moveVec = new THREE.Vector3();
-            moveVec.addScaledVector(forward, -inputZ * 0.15);
-            moveVec.addScaledVector(right, inputX * 0.15);
+            _moveVec.set(0, 0, 0);
+            _moveVec.addScaledVector(_forward, -inputZ * MOVE_SPEED);
+            _moveVec.addScaledVector(_right, inputX * MOVE_SPEED);
 
-            // Calculate current distance before moving
-            const offset = new THREE.Vector3().subVectors(camera.position, beanGroup.position);
+            // 3. Physics (Gravity)
+            velocityY += GRAVITY;
+            bean.position.y += velocityY;
 
-            beanGroup.position.add(moveVec);
-            beanGroup.position.y = 0.8;
-
-            if (moveVec.length() > 0.01) {
-                const targetRotation = Math.atan2(moveVec.x, moveVec.z);
-                beanGroup.rotation.y = THREE.MathUtils.lerp(beanGroup.rotation.y, targetRotation, 0.15);
+            if (bean.position.y <= GROUND_Y) {
+                bean.position.y = GROUND_Y;
+                velocityY = 0;
+                isGrounded = true;
             }
 
-            // --- TIGHT FOLLOW LOGIC ---
-            // Move the camera position along with the bean so the distance stays constant
-            camera.position.add(moveVec); 
+            // 4. Apply Movement & Rotation
+            bean.position.add(_moveVec);
+            if (_moveVec.length() > 0.01) {
+                const targetRot = Math.atan2(_moveVec.x, _moveVec.z);
+                bean.rotation.y = THREE.MathUtils.lerp(bean.rotation.y, targetRot, 0.15);
+            }
 
-            controls.target.copy(beanGroup.position);
+            // 5. Camera Follow
+            camera.position.add(_moveVec);
+            controls.target.copy(bean.position);
             controls.update();
 
             renderer.render(scene, camera);
